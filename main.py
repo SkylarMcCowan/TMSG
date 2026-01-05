@@ -214,6 +214,17 @@ def fetch_results(query: str, category_key: str):
     return []
 
 
+def sanitize_display_name(text: str) -> str:
+    """Remove problematic Unicode/emoji characters for Tk Treeview compatibility."""
+    # Remove emoji and problematic Unicode characters
+    # Keep ASCII alphanumeric, common symbols, and basic Latin extended
+    return "".join(
+        char for char in text
+        if ord(char) < 0x1F600 or (0x1F600 <= ord(char) < 0x1F650 and char not in "😀😁😂😃😄😅😆😇😈😉😊😋😌😍😎😏😐😍")
+        or ord(char) < 128  # Safe ASCII range
+    )
+
+
 def filter_and_sort(rows, resolution: str = "1080"):
     filtered = []
     for row in rows:
@@ -233,9 +244,11 @@ def filter_and_sort(rows, resolution: str = "1080"):
         seeders = int(row.get("seeders", 0))
         leechers = int(row.get("leechers", 0))
         size = int(row.get("size", 0))
+        # Sanitize display name to avoid Tk/emoji rendering crash
+        display_name = sanitize_display_name(name)
         filtered.append(
             {
-                "name": name,
+                "name": display_name,
                 "info_hash": info_hash,
                 "seeders": seeders,
                 "leechers": leechers,
