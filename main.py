@@ -26,6 +26,8 @@ CATEGORY_SETS = {
     "movies_hd": ["207", "201", "200"],  # HD Movies, then fallback to Movies/Video
     "shows_hd": ["208", "205", "200"],   # HD TV, fallback to TV/Video
     "all_video": ["200", "0"],            # Broadest search
+    "music": ["101", "100", "0"],        # Music, then fallback to Audio/all categories
+    "books": ["601", "0"],                # Books, fallback to all categories
 }
 
 TRACKERS = [
@@ -213,16 +215,46 @@ def fetch_results(query: str, category_key: str):
         raise RuntimeError(f"All proxy endpoints/categories failed. Last error: {last_error}")
     return []
 
+# --- New: Fetch top movies/shows from TPB HTML top lists ---
+def fetch_top_list(top_type: str):
+    """
+    Fetch top 100 movies, shows, music, or books from TPB's top lists.
+    top_type: 'movies', 'shows', 'music', or 'books'
+    Returns: list of dicts with keys: name, info_hash, seeders, leechers, size
+    """
+    # TPB top list categories: 201 = Movies, 205 = TV Shows, 101 = Music, 601 = E-books
+    cat = {
+        "movies": "201",
+        "shows": "205",
+        "music": "101",
+        "books": "601",
+    }.get(top_type, "201")
+    for endpoint in HTML_ENDPOINTS:
+        url = endpoint.replace("/search/{query}/1/99/{cat}", f"/top/{cat}")
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                html = resp.read().decode("utf-8", errors="ignore")
+            parser = TPBHTMLParser()
+            parser.feed(html)
+            if parser.rows:
+                return parser.rows
+        except Exception:
+            continue
+    return []
+
 
 def sanitize_display_name(text: str) -> str:
     """Remove problematic Unicode/emoji characters for Tk Treeview compatibility."""
-    # Remove emoji and problematic Unicode characters
-    # Keep ASCII alphanumeric, common symbols, and basic Latin extended
+    # Keep ASCII and basic Latin Extended, exclude emoji and symbols
     return "".join(
         char for char in text
-        if ord(char) < 0x1F600 or (0x1F600 <= ord(char) < 0x1F650 and char not in "😀😁😂😃😄😅😆😇😈😉😊😋😌😍😎😏😐😍")
-        or ord(char) < 128  # Safe ASCII range
+        if ord(char) < 0x2600  # Exclude symbols and emoji (starts at U+2600)
     )
+
+
+def should_filter_by_resolution(category_key: str) -> bool:
+    return category_key in {"movies_hd", "shows_hd", "all_video"}
 
 
 def filter_and_sort(rows, resolution: str = "1080"):
@@ -261,7 +293,7 @@ def filter_and_sort(rows, resolution: str = "1080"):
 
 def create_app():
     root = tk.Tk()
-    root.title("1080p Magnet Finder")
+    root.title("Magnet Finder")
     root.geometry("900x520")
 
     query_var = tk.StringVar()
@@ -269,6 +301,9 @@ def create_app():
     status_var = tk.StringVar(value="Ready")
     magnet_var = tk.StringVar()
     resolution_var = tk.StringVar(value="1080")  # options: 4k, 1080, any
+
+    # --- New: Top list type variable ---
+    top_type_var = tk.StringVar(value="movies")  # 'movies', 'shows', 'music', or 'books'
 
     def on_search():
         query = query_var.get().strip()
@@ -279,7 +314,10 @@ def create_app():
             status_var.set("Searching…")
             root.update_idletasks()
             raw = fetch_results(query, category_var.get())
-            results = filter_and_sort(raw, resolution=resolution_var.get())
+            apply_resolution = should_filter_by_resolution(category_var.get())
+            results = filter_and_sort(
+                raw, resolution=resolution_var.get() if apply_resolution else "any"
+            )
             table.delete(*table.get_children())
             for idx, row in enumerate(results, start=1):
                 table.insert(
@@ -297,24 +335,62 @@ def create_app():
             if results:
                 status_var.set(f"Found {len(results)} results. Double-click to copy magnet.")
             else:
-                res_label = {
-                    "4k": "4K",
-                    "1080": "1080p",
-                    "any": "any resolution",
-                }.get(resolution_var.get(), "requested")
+                res_label = (
+                    {
+                        "4k": "4K",
+                        "1080": "1080p",
+                        "any": "any resolution",
+                    }.get(resolution_var.get(), "requested")
+                    if apply_resolution
+                    else "matching"
+                )
                 status_var.set(f"No {res_label} results. Try broader category or another filter.")
         except Exception as exc:  # pylint: disable=broad-except
             status_var.set("Error")
             messagebox.showerror("Search failed", str(exc))
 
+    def on_browse_top():
+        # Fetch and display TPB top items for the selected category.
+        top_type = top_type_var.get()
+        status_var.set(f"Fetching top {top_type}…")
+        root.update_idletasks()
+        try:
+            raw = fetch_top_list(top_type)
+            # No resolution filter for top list, but keep sort and sanitize
+            results = filter_and_sort(raw, resolution="any")
+            table.delete(*table.get_children())
+            for idx, row in enumerate(results, start=1):
+                table.insert(
+                    "",
+                    "end",
+                    iid=str(idx),
+                    values=(
+                        row["name"],
+                        row["seeders"],
+                        row["leechers"],
+                        human_size(row["size"]),
+                    ),
+                    tags=(row["info_hash"],),
+                )
+            if results:
+                status_var.set(f"Top {top_type} loaded. Double-click to copy magnet.")
+            else:
+                status_var.set(f"No top {top_type} found.")
+        except Exception as exc:
+            status_var.set("Error")
+            messagebox.showerror("Browse Top failed", str(exc))
+
     def on_row_selected(event):
-        item_id = table.focus()
-        if not item_id:
+        selection = table.selection()
+        if not selection:
+            magnet_var.set("")
             return
-        info_hash = table.item(item_id, "tags")[0]
-        name = table.item(item_id, "values")[0]
-        magnet = build_magnet(info_hash, name)
-        magnet_var.set(magnet)
+        magnets = []
+        for item_id in selection:
+            info_hash = table.item(item_id, "tags")[0]
+            name = table.item(item_id, "values")[0]
+            magnets.append(build_magnet(info_hash, name))
+        magnet_var.set("\n".join(magnets))
 
     def copy_magnet():
         magnet = magnet_var.get()
@@ -322,7 +398,11 @@ def create_app():
             return
         root.clipboard_clear()
         root.clipboard_append(magnet)
-        status_var.set("Magnet copied to clipboard.")
+        count = magnet.count("\n") + 1
+        if count > 1:
+            status_var.set(f"{count} magnets copied to clipboard.")
+        else:
+            status_var.set("Magnet copied to clipboard.")
 
     # Controls frame
     controls = ttk.Frame(root, padding=10)
@@ -340,6 +420,12 @@ def create_app():
     ttk.Radiobutton(
         controls, text="All Video", value="all_video", variable=category_var
     ).pack(side="left", padx=4)
+    ttk.Radiobutton(
+        controls, text="Music", value="music", variable=category_var
+    ).pack(side="left", padx=4)
+    ttk.Radiobutton(
+        controls, text="Books", value="books", variable=category_var
+    ).pack(side="left", padx=4)
 
     # Resolution filter
     res_frame = ttk.Frame(controls)
@@ -350,6 +436,16 @@ def create_app():
 
     ttk.Button(controls, text="Search", command=on_search).pack(side="left", padx=12)
 
+    # --- New: Browse Top controls ---
+    browse_frame = ttk.Frame(controls)
+    browse_frame.pack(side="left", padx=(12, 0))
+    ttk.Label(browse_frame, text="Browse Top (48h):").pack(side="left")
+    ttk.Radiobutton(browse_frame, text="Movies", value="movies", variable=top_type_var).pack(side="left")
+    ttk.Radiobutton(browse_frame, text="Shows", value="shows", variable=top_type_var).pack(side="left")
+    ttk.Radiobutton(browse_frame, text="Music", value="music", variable=top_type_var).pack(side="left")
+    ttk.Radiobutton(browse_frame, text="Books", value="books", variable=top_type_var).pack(side="left")
+    ttk.Button(browse_frame, text="Go", command=on_browse_top).pack(side="left", padx=(4, 0))
+
     # Table frame
     table_frame = ttk.Frame(root, padding=10)
     table_frame.pack(fill="both", expand=True)
@@ -359,11 +455,35 @@ def create_app():
         table_frame,
         columns=columns,
         show="headings",
-        selectmode="browse",
+        selectmode="extended",
         height=18,
     )
+    sort_state = {"Name": False, "Seeders": True, "Leechers": True}
+
+    def sort_by_column(col_name: str):
+        col_index = columns.index(col_name)
+        descending = sort_state.get(col_name, False)
+
+        def sort_key(item_id: str):
+            value = table.item(item_id, "values")[col_index]
+            if col_name in ("Seeders", "Leechers"):
+                try:
+                    return int(value)
+                except (TypeError, ValueError):
+                    return 0
+            return str(value).lower()
+
+        items = list(table.get_children(""))
+        items.sort(key=sort_key, reverse=descending)
+        for index, item_id in enumerate(items):
+            table.move(item_id, "", index)
+        sort_state[col_name] = not descending
+
     for col in columns:
-        table.heading(col, text=col)
+        if col in ("Name", "Seeders", "Leechers"):
+            table.heading(col, text=col, command=lambda c=col: sort_by_column(c))
+        else:
+            table.heading(col, text=col)
         anchor = "w" if col == "Name" else "center"
         width = 520 if col == "Name" else 90
         table.column(col, anchor=anchor, width=width)
@@ -376,7 +496,7 @@ def create_app():
     table_frame.columnconfigure(0, weight=1)
 
     table.bind("<<TreeviewSelect>>", on_row_selected)
-    table.bind("<Double-1>", on_row_selected)
+    # Removed double-click binding to avoid copying the wrong link
 
     # Magnet box
     magnet_frame = ttk.Frame(root, padding=10)
