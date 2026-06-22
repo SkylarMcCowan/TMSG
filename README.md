@@ -1,15 +1,24 @@
-# 1080p Magnet Finder
+# Magnet Finder
 
-A lightweight GUI application to search The Pirate Bay and retrieve magnet links for movies and TV shows.
+A lightweight Tkinter GUI application to search configured TPB-style endpoints and retrieve magnet links for video, music, and books.
+
+Current version: **1.1 - QoL Update**
 
 ## Features
 
-- **Multi-proxy support**: Automatically tries multiple TPB proxy endpoints if one fails
-- **Resolution filtering**: Filter results by 1080p, 4K, or any resolution
-- **Seeders sorting**: Results sorted by seeder count (highest first)
-- **Category selection**: Search by Movies (HD), TV Shows (HD), or All Video
-- **One-click magnet copy**: Double-click a result to copy the magnet link to clipboard
-- **HTML fallback**: Falls back to HTML scraping if JSON API endpoints fail
+- **Multi-source search**: Queries configured API and HTML endpoints, then merges unique results by info hash
+- **Endpoint health indicator**: Status bar shows which sources returned results, were empty, or failed
+- **Background searches**: Network requests run off the UI thread so the app stays responsive
+- **Compact selectors**: Dropdowns for type, quality, and Browse Top keep the toolbar cleaner
+- **Smart quality control**: Hides the quality selector when searching Books
+- **Resolution filtering**: Filter video results by 1080p, 4K, or any resolution
+- **Category selection**: Search Movies, TV Shows, All Video, Music, or Books
+- **Browse Top**: Load top Movies, Shows, Music, or Books from configured HTML endpoints
+- **Dark mode**: Toggle between light and dark UI themes
+- **Fullscreen launch**: Starts fullscreen; press `Esc` to leave fullscreen
+- **Keyboard search**: Press `Enter` in the query box to start searching
+- **Sortable table**: Sort results by name, seeders, or leechers
+- **Magnet copy**: Select one or more rows, then click **Copy** to copy magnet links
 
 ## Requirements
 
@@ -40,6 +49,7 @@ No external packages required! The app uses only Python's standard library:
 - `tkinter` (GUI)
 - `html.parser` (HTML parsing)
 - `re` (regex)
+- `threading` and `queue` (background search processing)
 
 ### 4. Run the application
 
@@ -54,33 +64,46 @@ A GUI window will open. Enter a search query, select filters, and click **Search
 ### Basic Workflow
 
 1. **Enter a search query** (e.g., "The Matrix 1080p")
-2. **Choose a category**: Movies (HD), TV Shows (HD), or All Video
-3. **Select resolution filter**: 1080p, 4K, or Any
-4. **Click Search** – Results appear in the table, sorted by seeders
-5. **Double-click a result** to populate the magnet link field
+2. **Choose a type**: Movie, TV Show, All Video, Music, or Books
+3. **Select quality**: 1080p, 4K, or Any. This control is hidden for Books.
+4. **Click Search** or press `Enter` in the query box
+5. **Select one or more rows** to populate the magnet link field
 6. **Click Copy** to copy the magnet to your clipboard
 7. **Paste into your torrent client** and download
+
+### Browse Top
+
+1. Choose Movies, Shows, Music, or Books from **Browse Top**
+2. Click **Go**
+3. Select result rows and click **Copy**
 
 ### Search Tips
 
 - Be specific: "Dune 2021 1080p" works better than "Dune"
-- Try broader categories if no results appear
+- Try broader types if no results appear, such as All Video
+- Use Any quality if a search is too narrow
 - Higher seeder count = faster download
 - Check file size to confirm it matches your expectations
+- Watch the status bar to see which endpoints worked or failed
 
 ## Configuration
 
 ### Proxy Endpoints
 
-If a proxy is down, the app tries these in order (in `API_ENDPOINTS` and `HTML_ENDPOINTS` lists):
+Endpoints are configured near the top of `main.py`. Each endpoint has a display name and URL template.
 
 ```python
 API_ENDPOINTS = [
-    "https://apibay.org/q.php?q={query}&cat={category}",
-    "https://pirateproxy.live/apibay/q.php?q={query}&cat={category}",
-    "https://apibay.sbs/q.php?q={query}&cat={category}",
+    {"name": "apibay.org", "url": "https://apibay.org/q.php?q={query}&cat={category}"},
+    {
+        "name": "pirateproxy.live",
+        "url": "https://pirateproxy.live/apibay/q.php?q={query}&cat={category}",
+    },
+    {"name": "apibay.sbs", "url": "https://apibay.sbs/q.php?q={query}&cat={category}"},
 ]
 ```
+
+Searches merge results across all working sources instead of stopping at the first successful endpoint.
 
 ### Trackers
 
@@ -123,9 +146,11 @@ Download Python from [python.org](https://www.python.org) and check the "tcl/tk 
 ### No search results
 
 - Try a broader search term (e.g., "Matrix" instead of "The Matrix 1080p Remastered")
-- Switch to "All Video" category instead of Movies/TV
+- Switch to "All Video" type instead of Movie/TV Show
+- Switch quality to Any
 - Check your internet connection
-- Try again in a few minutes (proxies can be temporarily down)
+- Check endpoint health in the status bar
+- Try again in a few minutes because endpoints can be temporarily down
 
 ### GUI doesn't appear
 
@@ -136,6 +161,50 @@ Download Python from [python.org](https://www.python.org) and check the "tcl/tk 
 ### Magnet link looks incomplete
 
 The magnet link may appear truncated in the text field but is complete. Click **Copy** and paste it into your torrent client to verify.
+
+## Changelog
+
+### 1.1 - QoL Update
+
+- Replaced crowded radio buttons with compact dropdown selectors
+- Added background search processing to avoid UI stutter
+- Added endpoint health reporting in the status bar
+- Broadened searches by merging results from all configured endpoints
+- Added Browse Top selectors for Movies, Shows, Music, and Books
+- Added dark mode
+- Added fullscreen startup with `Esc` to exit fullscreen
+- Added `Enter` key search from the query box
+- Hid quality selection for Books
+
+### 1.0
+
+- Initial search UI
+- API endpoint search with HTML fallback
+- Resolution filtering
+- Magnet generation and clipboard copy
+
+## Roadmap
+
+- **1.2 - Search polish**
+  - Search history dropdown
+  - Min seeders and max size filters
+  - Include/exclude keyword filters
+  - Clear Search / Reset Filters action
+
+- **1.3 - Result management**
+  - Favorites saved to a local JSON file
+  - Export visible results to CSV or JSON
+  - Result details panel with info hash, size, seeders, leechers, and full magnet
+
+- **1.4 - Endpoint tools**
+  - Endpoint settings editor in the UI
+  - Manual endpoint health check
+  - Per-endpoint enable/disable toggles
+
+- **Later**
+  - Open selected magnet directly in the system torrent client
+  - Optional compact/windowed startup mode
+  - Better duplicate grouping by normalized title and size
 
 ## Legal Notice
 
