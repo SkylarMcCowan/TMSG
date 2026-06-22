@@ -1,5 +1,7 @@
 import json
+import queue
 import re
+import threading
 import tkinter as tk
 from html.parser import HTMLParser
 from tkinter import ttk, messagebox
@@ -7,18 +9,21 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-# Multiple TPB proxy endpoints; we try them in order until one works.
+# Multiple TPB proxy endpoints; searches merge results across all working sources.
 API_ENDPOINTS = [
-    "https://apibay.org/q.php?q={query}&cat={category}",
-    "https://pirateproxy.live/apibay/q.php?q={query}&cat={category}",
-    "https://apibay.sbs/q.php?q={query}&cat={category}",
+    {"name": "apibay.org", "url": "https://apibay.org/q.php?q={query}&cat={category}"},
+    {
+        "name": "pirateproxy.live",
+        "url": "https://pirateproxy.live/apibay/q.php?q={query}&cat={category}",
+    },
+    {"name": "apibay.sbs", "url": "https://apibay.sbs/q.php?q={query}&cat={category}"},
 ]
 
 # HTML search endpoints, starting with the primary TPB domain.
 HTML_ENDPOINTS = [
-    "https://thepiratebay.org/search/{query}/1/99/{cat}",
-    "https://thepiratebay0.org/search/{query}/1/99/{cat}",
-    "https://tpb.party/search/{query}/1/99/{cat}",
+    {"name": "thepiratebay.org", "url": "https://thepiratebay.org/search/{query}/1/99/{cat}"},
+    {"name": "thepiratebay0.org", "url": "https://thepiratebay0.org/search/{query}/1/99/{cat}"},
+    {"name": "tpb.party", "url": "https://tpb.party/search/{query}/1/99/{cat}"},
 ]
 
 # TPB category sets to query (we try each until we get results).
@@ -69,6 +74,47 @@ def parse_btih_from_magnet(magnet: str) -> str | None:
         if xt.startswith("urn:btih:"):
             return xt.split(":", 2)[-1]
     return None
+
+
+def merge_unique_results(rows):
+    merged = []
+    seen_hashes = set()
+    for row in rows:
+        info_hash = row.get("info_hash")
+        if not info_hash:
+            continue
+        key = str(info_hash).lower()
+        if key in seen_hashes:
+            continue
+        seen_hashes.add(key)
+        merged.append(row)
+    return merged
+
+
+def summarize_health(health, max_names: int = 2) -> str:
+    if not health:
+        return "No endpoints checked."
+    ok = [item for item in health if item["status"] == "ok"]
+    empty = [item for item in health if item["status"] == "empty"]
+    failed = [item for item in health if item["status"] == "failed"]
+
+    parts = []
+    if ok:
+        ok_text = ", ".join(f"{item['name']}:{item['count']}" for item in ok[:max_names])
+        if len(ok) > max_names:
+            ok_text += f", +{len(ok) - max_names} more"
+        parts.append(f"ok {ok_text}")
+    if empty:
+        empty_text = ", ".join(item["name"] for item in empty[:max_names])
+        if len(empty) > max_names:
+            empty_text += f", +{len(empty) - max_names} more"
+        parts.append(f"empty {empty_text}")
+    if failed:
+        failed_text = ", ".join(item["name"] for item in failed[:max_names])
+        if len(failed) > max_names:
+            failed_text += f", +{len(failed) - max_names} more"
+        parts.append(f"failed {failed_text}")
+    return "; ".join(parts)
 
 
 class TPBHTMLParser(HTMLParser):
@@ -151,10 +197,13 @@ class TPBHTMLParser(HTMLParser):
 
 def fetch_html_results(query: str, category_key: str):
     encoded_query = urllib.parse.quote(query)
-    last_error = None
+    all_rows = []
+    health = []
     for endpoint in HTML_ENDPOINTS:
+        endpoint_rows = []
+        endpoint_error = None
         for cat in CATEGORY_SETS[category_key]:
-            url = endpoint.format(query=encoded_query, cat=cat)
+            url = endpoint["url"].format(query=encoded_query, cat=cat)
             req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
             try:
                 with urllib.request.urlopen(req, timeout=10) as resp:
@@ -162,13 +211,24 @@ def fetch_html_results(query: str, category_key: str):
                 parser = TPBHTMLParser()
                 parser.feed(html)
                 if parser.rows:
-                    return parser.rows
+                    endpoint_rows.extend(parser.rows)
             except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError) as exc:
-                last_error = exc
+                endpoint_error = exc
                 continue
-    if last_error:
-        raise RuntimeError(f"All HTML endpoints failed. Last error: {last_error}")
-    return []
+        if endpoint_rows:
+            all_rows.extend(endpoint_rows)
+            health.append({"name": endpoint["name"], "status": "ok", "count": len(endpoint_rows)})
+        else:
+            health.append(
+                {
+                    "name": endpoint["name"],
+                    "status": "failed" if endpoint_error else "empty",
+                    "count": 0,
+                }
+            )
+    if all_rows:
+        return merge_unique_results(all_rows), health
+    return [], health
 
 
 def human_size(size_bytes: int) -> str:
@@ -190,30 +250,45 @@ def build_magnet(info_hash: str, name: str) -> str:
 
 def fetch_results(query: str, category_key: str):
     encoded_query = urllib.parse.quote(query)
-    last_error = None
+    all_rows = []
+    health = []
     for endpoint in API_ENDPOINTS:
+        endpoint_rows = []
+        endpoint_error = None
         for cat in CATEGORY_SETS[category_key]:
-            url = endpoint.format(query=encoded_query, category=cat)
+            url = endpoint["url"].format(query=encoded_query, category=cat)
             req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
             try:
                 with urllib.request.urlopen(req, timeout=8) as resp:
                     body = resp.read().decode("utf-8", errors="ignore")
                 data = json.loads(body)
                 if isinstance(data, list) and data:
-                    return data
+                    endpoint_rows.extend(data)
                 # If empty, try next category/endpoint.
             except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError) as exc:
-                last_error = exc
+                endpoint_error = exc
                 continue
             except json.JSONDecodeError as exc:
-                last_error = exc
+                endpoint_error = exc
                 continue
-    html_rows = fetch_html_results(query, category_key)
+        if endpoint_rows:
+            all_rows.extend(endpoint_rows)
+            health.append({"name": endpoint["name"], "status": "ok", "count": len(endpoint_rows)})
+        else:
+            health.append(
+                {
+                    "name": endpoint["name"],
+                    "status": "failed" if endpoint_error else "empty",
+                    "count": 0,
+                }
+            )
+    html_rows, html_health = fetch_html_results(query, category_key)
+    health.extend(html_health)
     if html_rows:
-        return html_rows
-    if last_error:
-        raise RuntimeError(f"All proxy endpoints/categories failed. Last error: {last_error}")
-    return []
+        all_rows.extend(html_rows)
+    if all_rows:
+        return merge_unique_results(all_rows), health
+    return [], health
 
 # --- New: Fetch top movies/shows from TPB HTML top lists ---
 def fetch_top_list(top_type: str):
@@ -229,8 +304,10 @@ def fetch_top_list(top_type: str):
         "music": "101",
         "books": "601",
     }.get(top_type, "201")
+    all_rows = []
+    health = []
     for endpoint in HTML_ENDPOINTS:
-        url = endpoint.replace("/search/{query}/1/99/{cat}", f"/top/{cat}")
+        url = endpoint["url"].replace("/search/{query}/1/99/{cat}", f"/top/{cat}")
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
         try:
             with urllib.request.urlopen(req, timeout=10) as resp:
@@ -238,10 +315,14 @@ def fetch_top_list(top_type: str):
             parser = TPBHTMLParser()
             parser.feed(html)
             if parser.rows:
-                return parser.rows
+                all_rows.extend(parser.rows)
+                health.append({"name": endpoint["name"], "status": "ok", "count": len(parser.rows)})
+            else:
+                health.append({"name": endpoint["name"], "status": "empty", "count": 0})
         except Exception:
+            health.append({"name": endpoint["name"], "status": "failed", "count": 0})
             continue
-    return []
+    return merge_unique_results(all_rows), health
 
 
 def sanitize_display_name(text: str) -> str:
@@ -295,6 +376,8 @@ def create_app():
     root = tk.Tk()
     root.title("Magnet Finder")
     root.geometry("900x520")
+    root.attributes("-fullscreen", True)
+    root.bind("<Escape>", lambda event: root.attributes("-fullscreen", False))
     style = ttk.Style(root)
     try:
         style.theme_use("clam")
@@ -455,37 +538,93 @@ def create_app():
     def selected_value(options: dict[str, str], selected_label: str) -> str:
         return options.get(selected_label, next(iter(options.values())))
 
+    task_queue = queue.Queue()
+    active_task = {"running": False}
+
+    def set_busy(is_busy: bool):
+        button_state = "disabled" if is_busy else "normal"
+        combo_state = "disabled" if is_busy else "readonly"
+        entry_state = "disabled" if is_busy else "normal"
+
+        search_btn.configure(state=button_state)
+        browse_btn.configure(state=button_state)
+        query_entry.configure(state=entry_state)
+        category_combo.configure(state=combo_state)
+        quality_combo.configure(state=combo_state)
+        top_combo.configure(state=combo_state)
+
+    def populate_table(results):
+        table.delete(*table.get_children())
+        for idx, row in enumerate(results, start=1):
+            table.insert(
+                "",
+                "end",
+                iid=str(idx),
+                values=(
+                    row["name"],
+                    row["seeders"],
+                    row["leechers"],
+                    human_size(row["size"]),
+                ),
+                tags=(row["info_hash"],),
+            )
+
+    def poll_task_queue():
+        try:
+            status, on_success, payload, error_title = task_queue.get_nowait()
+        except queue.Empty:
+            if active_task["running"]:
+                root.after(100, poll_task_queue)
+            return
+
+        active_task["running"] = False
+        set_busy(False)
+        if status == "ok":
+            on_success(payload)
+            return
+
+        status_var.set("Error")
+        messagebox.showerror(error_title, str(payload))
+
+    def run_background(status_text: str, worker, on_success, error_title: str):
+        if active_task["running"]:
+            return
+        active_task["running"] = True
+        set_busy(True)
+        status_var.set(status_text)
+
+        def target():
+            try:
+                task_queue.put(("ok", on_success, worker(), error_title))
+            except Exception as exc:  # pylint: disable=broad-except
+                task_queue.put(("error", on_success, exc, error_title))
+
+        threading.Thread(target=target, daemon=True).start()
+        root.after(100, poll_task_queue)
+
     def on_search():
         query = query_var.get().strip()
         if not query:
             messagebox.showinfo("Missing query", "Please enter a search term.")
             return
-        try:
-            category_key = selected_value(category_options, category_var.get())
-            resolution_key = selected_value(quality_options, resolution_var.get())
-            status_var.set("Searching…")
-            root.update_idletasks()
-            raw = fetch_results(query, category_key)
-            apply_resolution = should_filter_by_resolution(category_key)
+
+        category_key = selected_value(category_options, category_var.get())
+        resolution_key = selected_value(quality_options, resolution_var.get())
+        apply_resolution = should_filter_by_resolution(category_key)
+
+        def worker():
+            raw, health = fetch_results(query, category_key)
             results = filter_and_sort(
                 raw, resolution=resolution_key if apply_resolution else "any"
             )
-            table.delete(*table.get_children())
-            for idx, row in enumerate(results, start=1):
-                table.insert(
-                    "",
-                    "end",
-                    iid=str(idx),
-                    values=(
-                        row["name"],
-                        row["seeders"],
-                        row["leechers"],
-                        human_size(row["size"]),
-                    ),
-                    tags=(row["info_hash"],),
-                )
+            return results, health
+
+        def finish(payload):
+            results, health = payload
+            health_text = summarize_health(health)
+            populate_table(results)
             if results:
-                status_var.set(f"Found {len(results)} results. Double-click to copy magnet.")
+                status_var.set(f"Found {len(results)} results. Sources: {health_text}")
             else:
                 res_label = (
                     {
@@ -496,42 +635,31 @@ def create_app():
                     if apply_resolution
                     else "matching"
                 )
-                status_var.set(f"No {res_label} results. Try broader category or another filter.")
-        except Exception as exc:  # pylint: disable=broad-except
-            status_var.set("Error")
-            messagebox.showerror("Search failed", str(exc))
+                status_var.set(f"No {res_label} results. Sources: {health_text}")
+
+        run_background("Searching...", worker, finish, "Search failed")
 
     def on_browse_top():
         # Fetch and display TPB top items for the selected category.
         top_label = top_type_var.get()
         top_type = selected_value(top_options, top_label)
-        status_var.set(f"Fetching top {top_label.lower()}…")
-        root.update_idletasks()
-        try:
-            raw = fetch_top_list(top_type)
+
+        def worker():
+            raw, health = fetch_top_list(top_type)
             # No resolution filter for top list, but keep sort and sanitize
             results = filter_and_sort(raw, resolution="any")
-            table.delete(*table.get_children())
-            for idx, row in enumerate(results, start=1):
-                table.insert(
-                    "",
-                    "end",
-                    iid=str(idx),
-                    values=(
-                        row["name"],
-                        row["seeders"],
-                        row["leechers"],
-                        human_size(row["size"]),
-                    ),
-                    tags=(row["info_hash"],),
-                )
+            return results, health
+
+        def finish(payload):
+            results, health = payload
+            health_text = summarize_health(health)
+            populate_table(results)
             if results:
-                status_var.set(f"Top {top_label.lower()} loaded. Double-click to copy magnet.")
+                status_var.set(f"Top {top_label.lower()} loaded. Sources: {health_text}")
             else:
-                status_var.set(f"No top {top_label.lower()} found.")
-        except Exception as exc:
-            status_var.set("Error")
-            messagebox.showerror("Browse Top failed", str(exc))
+                status_var.set(f"No top {top_label.lower()} found. Sources: {health_text}")
+
+        run_background(f"Fetching top {top_label.lower()}...", worker, finish, "Browse Top failed")
 
     def on_row_selected(event):
         selection = table.selection()
@@ -562,27 +690,45 @@ def create_app():
     controls.pack(fill="x")
 
     ttk.Label(controls, text="Query:").pack(side="left")
-    ttk.Entry(controls, textvariable=query_var, width=40).pack(side="left", padx=6)
+    query_entry = ttk.Entry(controls, textvariable=query_var, width=40)
+    query_entry.pack(side="left", padx=6)
+    query_entry.bind("<Return>", lambda event: on_search())
 
     ttk.Label(controls, text="Type:").pack(side="left", padx=(12, 4))
-    ttk.Combobox(
+    category_combo = ttk.Combobox(
         controls,
         textvariable=category_var,
         values=list(category_options.keys()),
         width=10,
         state="readonly",
-    ).pack(side="left")
+    )
+    category_combo.pack(side="left")
 
-    ttk.Label(controls, text="Quality:").pack(side="left", padx=(12, 4))
-    ttk.Combobox(
+    quality_label = ttk.Label(controls, text="Quality:")
+    quality_combo = ttk.Combobox(
         controls,
         textvariable=resolution_var,
         values=list(quality_options.keys()),
         width=7,
         state="readonly",
-    ).pack(side="left")
+    )
 
-    ttk.Button(controls, text="Search", command=on_search).pack(side="left", padx=12)
+    def update_quality_visibility(event=None):
+        if category_var.get() == "Books":
+            quality_label.pack_forget()
+            quality_combo.pack_forget()
+            return
+        if not quality_label.winfo_manager():
+            quality_label.pack(side="left", padx=(12, 4), before=search_btn)
+            quality_combo.pack(side="left", before=search_btn)
+
+    quality_label.pack(side="left", padx=(12, 4))
+    quality_combo.pack(side="left")
+
+    search_btn = ttk.Button(controls, text="Search", command=on_search)
+    search_btn.pack(side="left", padx=12)
+    category_combo.bind("<<ComboboxSelected>>", update_quality_visibility)
+    update_quality_visibility()
 
     # Theme toggle button
     theme_btn = ttk.Button(controls, text="Dark Mode", command=on_theme_toggle)
@@ -592,14 +738,16 @@ def create_app():
     browse_frame = ttk.Frame(controls)
     browse_frame.pack(side="left", padx=(12, 0))
     ttk.Label(browse_frame, text="Browse Top:").pack(side="left")
-    ttk.Combobox(
+    top_combo = ttk.Combobox(
         browse_frame,
         textvariable=top_type_var,
         values=list(top_options.keys()),
         width=8,
         state="readonly",
-    ).pack(side="left", padx=(4, 0))
-    ttk.Button(browse_frame, text="Go", command=on_browse_top).pack(side="left", padx=(6, 0))
+    )
+    top_combo.pack(side="left", padx=(4, 0))
+    browse_btn = ttk.Button(browse_frame, text="Go", command=on_browse_top)
+    browse_btn.pack(side="left", padx=(6, 0))
 
     # Table frame
     table_frame = ttk.Frame(root, padding=10)
