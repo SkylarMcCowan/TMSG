@@ -295,15 +295,165 @@ def create_app():
     root = tk.Tk()
     root.title("Magnet Finder")
     root.geometry("900x520")
+    style = ttk.Style(root)
+    try:
+        style.theme_use("clam")
+    except tk.TclError:
+        pass
+
+    category_options = {
+        "Movie": "movies_hd",
+        "TV Show": "shows_hd",
+        "All Video": "all_video",
+        "Music": "music",
+        "Books": "books",
+    }
+    quality_options = {
+        "1080p": "1080",
+        "4K": "4k",
+        "Any": "any",
+    }
+    top_options = {
+        "Movies": "movies",
+        "Shows": "shows",
+        "Music": "music",
+        "Books": "books",
+    }
 
     query_var = tk.StringVar()
-    category_var = tk.StringVar(value="movies_hd")
+    category_var = tk.StringVar(value="Movie")
     status_var = tk.StringVar(value="Ready")
     magnet_var = tk.StringVar()
-    resolution_var = tk.StringVar(value="1080")  # options: 4k, 1080, any
+    resolution_var = tk.StringVar(value="1080p")
 
     # --- New: Top list type variable ---
-    top_type_var = tk.StringVar(value="movies")  # 'movies', 'shows', 'music', or 'books'
+    top_type_var = tk.StringVar(value="Movies")
+
+    # Theme variables for dark/light mode
+    theme_var = tk.BooleanVar(value=False)  # False=light, True=dark
+
+    def apply_theme(is_dark: bool):
+        """Apply light or dark colors to existing ttk widgets."""
+        if is_dark:
+            colors = {
+                "bg": "#1e1e1e",
+                "panel": "#252526",
+                "field": "#2d2d30",
+                "fg": "#f2f2f2",
+                "muted": "#c8c8c8",
+                "border": "#3f3f46",
+                "button": "#3a6f50",
+                "button_active": "#467f5e",
+                "selected": "#0e639c",
+                "selected_fg": "#ffffff",
+            }
+        else:
+            colors = {
+                "bg": "#f5f5f5",
+                "panel": "#ffffff",
+                "field": "#ffffff",
+                "fg": "#111111",
+                "muted": "#333333",
+                "border": "#d0d0d0",
+                "button": "#e6e6e6",
+                "button_active": "#d8d8d8",
+                "selected": "#0a64ad",
+                "selected_fg": "#ffffff",
+            }
+
+        root.configure(background=colors["bg"])
+        root.option_add("*Background", colors["bg"])
+        root.option_add("*Foreground", colors["fg"])
+        root.option_add("*Entry.Background", colors["field"])
+        root.option_add("*Entry.Foreground", colors["fg"])
+        root.option_add("*selectBackground", colors["selected"])
+        root.option_add("*selectForeground", colors["selected_fg"])
+
+        style.configure(".", background=colors["bg"], foreground=colors["fg"])
+        style.configure("TFrame", background=colors["bg"])
+        style.configure("TLabel", background=colors["bg"], foreground=colors["fg"])
+        style.configure(
+            "TButton",
+            background=colors["button"],
+            foreground=colors["fg"],
+            bordercolor=colors["border"],
+            focusthickness=1,
+            focuscolor=colors["border"],
+        )
+        style.map(
+            "TButton",
+            background=[("active", colors["button_active"]), ("pressed", colors["button_active"])],
+            foreground=[("disabled", colors["muted"])],
+        )
+        style.configure(
+            "TEntry",
+            fieldbackground=colors["field"],
+            foreground=colors["fg"],
+            insertcolor=colors["fg"],
+            bordercolor=colors["border"],
+            lightcolor=colors["border"],
+            darkcolor=colors["border"],
+        )
+        style.configure(
+            "TCombobox",
+            fieldbackground=colors["field"],
+            background=colors["button"],
+            foreground=colors["fg"],
+            arrowcolor=colors["fg"],
+            bordercolor=colors["border"],
+            lightcolor=colors["border"],
+            darkcolor=colors["border"],
+        )
+        style.map(
+            "TCombobox",
+            fieldbackground=[("readonly", colors["field"])],
+            foreground=[("readonly", colors["fg"])],
+            selectbackground=[("readonly", colors["field"])],
+            selectforeground=[("readonly", colors["fg"])],
+        )
+        style.configure(
+            "Treeview",
+            background=colors["panel"],
+            fieldbackground=colors["panel"],
+            foreground=colors["fg"],
+            bordercolor=colors["border"],
+            rowheight=24,
+        )
+        style.map(
+            "Treeview",
+            background=[("selected", colors["selected"])],
+            foreground=[("selected", colors["selected_fg"])],
+        )
+        style.configure(
+            "Treeview.Heading",
+            background=colors["button"],
+            foreground=colors["fg"],
+            bordercolor=colors["border"],
+            relief="flat",
+        )
+        style.map("Treeview.Heading", background=[("active", colors["button_active"])])
+        style.configure(
+            "Vertical.TScrollbar",
+            background=colors["button"],
+            troughcolor=colors["bg"],
+            bordercolor=colors["border"],
+            arrowcolor=colors["fg"],
+        )
+
+        try:
+            theme_btn.configure(text="Light Mode" if is_dark else "Dark Mode")
+        except NameError:
+            pass
+
+    def on_theme_toggle():
+        """Toggle between light and dark themes."""
+        theme_var.set(not theme_var.get())
+        is_dark = theme_var.get()
+        apply_theme(is_dark)
+        status_var.set("Theme switched to" + (" dark mode" if is_dark else " light mode"))
+
+    def selected_value(options: dict[str, str], selected_label: str) -> str:
+        return options.get(selected_label, next(iter(options.values())))
 
     def on_search():
         query = query_var.get().strip()
@@ -311,12 +461,14 @@ def create_app():
             messagebox.showinfo("Missing query", "Please enter a search term.")
             return
         try:
+            category_key = selected_value(category_options, category_var.get())
+            resolution_key = selected_value(quality_options, resolution_var.get())
             status_var.set("Searching…")
             root.update_idletasks()
-            raw = fetch_results(query, category_var.get())
-            apply_resolution = should_filter_by_resolution(category_var.get())
+            raw = fetch_results(query, category_key)
+            apply_resolution = should_filter_by_resolution(category_key)
             results = filter_and_sort(
-                raw, resolution=resolution_var.get() if apply_resolution else "any"
+                raw, resolution=resolution_key if apply_resolution else "any"
             )
             table.delete(*table.get_children())
             for idx, row in enumerate(results, start=1):
@@ -340,7 +492,7 @@ def create_app():
                         "4k": "4K",
                         "1080": "1080p",
                         "any": "any resolution",
-                    }.get(resolution_var.get(), "requested")
+                    }.get(resolution_key, "requested")
                     if apply_resolution
                     else "matching"
                 )
@@ -351,8 +503,9 @@ def create_app():
 
     def on_browse_top():
         # Fetch and display TPB top items for the selected category.
-        top_type = top_type_var.get()
-        status_var.set(f"Fetching top {top_type}…")
+        top_label = top_type_var.get()
+        top_type = selected_value(top_options, top_label)
+        status_var.set(f"Fetching top {top_label.lower()}…")
         root.update_idletasks()
         try:
             raw = fetch_top_list(top_type)
@@ -373,9 +526,9 @@ def create_app():
                     tags=(row["info_hash"],),
                 )
             if results:
-                status_var.set(f"Top {top_type} loaded. Double-click to copy magnet.")
+                status_var.set(f"Top {top_label.lower()} loaded. Double-click to copy magnet.")
             else:
-                status_var.set(f"No top {top_type} found.")
+                status_var.set(f"No top {top_label.lower()} found.")
         except Exception as exc:
             status_var.set("Error")
             messagebox.showerror("Browse Top failed", str(exc))
@@ -411,46 +564,49 @@ def create_app():
     ttk.Label(controls, text="Query:").pack(side="left")
     ttk.Entry(controls, textvariable=query_var, width=40).pack(side="left", padx=6)
 
-    ttk.Radiobutton(
-        controls, text="Movies (HD)", value="movies_hd", variable=category_var
-    ).pack(side="left", padx=(12, 4))
-    ttk.Radiobutton(
-        controls, text="TV Shows (HD)", value="shows_hd", variable=category_var
-    ).pack(side="left", padx=4)
-    ttk.Radiobutton(
-        controls, text="All Video", value="all_video", variable=category_var
-    ).pack(side="left", padx=4)
-    ttk.Radiobutton(
-        controls, text="Music", value="music", variable=category_var
-    ).pack(side="left", padx=4)
-    ttk.Radiobutton(
-        controls, text="Books", value="books", variable=category_var
-    ).pack(side="left", padx=4)
+    ttk.Label(controls, text="Type:").pack(side="left", padx=(12, 4))
+    ttk.Combobox(
+        controls,
+        textvariable=category_var,
+        values=list(category_options.keys()),
+        width=10,
+        state="readonly",
+    ).pack(side="left")
 
-    # Resolution filter
-    res_frame = ttk.Frame(controls)
-    res_frame.pack(side="left", padx=(12, 0))
-    ttk.Radiobutton(res_frame, text="4K", value="4k", variable=resolution_var).pack(side="left")
-    ttk.Radiobutton(res_frame, text="1080p", value="1080", variable=resolution_var).pack(side="left")
-    ttk.Radiobutton(res_frame, text="Any", value="any", variable=resolution_var).pack(side="left")
+    ttk.Label(controls, text="Quality:").pack(side="left", padx=(12, 4))
+    ttk.Combobox(
+        controls,
+        textvariable=resolution_var,
+        values=list(quality_options.keys()),
+        width=7,
+        state="readonly",
+    ).pack(side="left")
 
     ttk.Button(controls, text="Search", command=on_search).pack(side="left", padx=12)
+
+    # Theme toggle button
+    theme_btn = ttk.Button(controls, text="Dark Mode", command=on_theme_toggle)
+    theme_btn.pack(side="right", padx=(6, 0))
 
     # --- New: Browse Top controls ---
     browse_frame = ttk.Frame(controls)
     browse_frame.pack(side="left", padx=(12, 0))
-    ttk.Label(browse_frame, text="Browse Top (48h):").pack(side="left")
-    ttk.Radiobutton(browse_frame, text="Movies", value="movies", variable=top_type_var).pack(side="left")
-    ttk.Radiobutton(browse_frame, text="Shows", value="shows", variable=top_type_var).pack(side="left")
-    ttk.Radiobutton(browse_frame, text="Music", value="music", variable=top_type_var).pack(side="left")
-    ttk.Radiobutton(browse_frame, text="Books", value="books", variable=top_type_var).pack(side="left")
-    ttk.Button(browse_frame, text="Go", command=on_browse_top).pack(side="left", padx=(4, 0))
+    ttk.Label(browse_frame, text="Browse Top:").pack(side="left")
+    ttk.Combobox(
+        browse_frame,
+        textvariable=top_type_var,
+        values=list(top_options.keys()),
+        width=8,
+        state="readonly",
+    ).pack(side="left", padx=(4, 0))
+    ttk.Button(browse_frame, text="Go", command=on_browse_top).pack(side="left", padx=(6, 0))
 
     # Table frame
     table_frame = ttk.Frame(root, padding=10)
     table_frame.pack(fill="both", expand=True)
 
     columns = ("Name", "Seeders", "Leechers", "Size")
+
     table = ttk.Treeview(
         table_frame,
         columns=columns,
@@ -510,6 +666,8 @@ def create_app():
     # Status bar
     status = ttk.Label(root, textvariable=status_var, relief="sunken", anchor="w")
     status.pack(fill="x", side="bottom")
+
+    apply_theme(theme_var.get())
 
     return root
 
